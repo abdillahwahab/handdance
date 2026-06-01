@@ -1,0 +1,39 @@
+services:
+  handdance:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: handdance:latest
+    container_name: handdance
+
+    ports:
+      - "5001:5000"
+
+    # ── Persistent volumes for music and beatmaps ──────────────────
+    volumes:
+      - ./music:/app/backend/music
+      - ./beatmaps:/app/backend/beatmaps
+
+    # ── Runtime environment ────────────────────────────────────────
+    environment:
+      MUSIC_DIR:        /app/backend/music
+      BEATMAP_DIR:      /app/backend/beatmaps
+      CAMERA_INDEX:     "0"
+      SWIPE_THRESHOLD:  "0.12"
+      PORT:             "5000"
+      PYTHONUNBUFFERED: "1"
+      SDL_AUDIODRIVER:  alsa
+      ALSA_CARD:        default
+      PYGAME_HIDE_SUPPORT_PROMPT: "1"
+
+    # ── Resource limits (keeps CPU smooth on low-end machines) ─────
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1G
+
+    restart: unless-stopped
+
+    stdin_open: true
+    tty: true

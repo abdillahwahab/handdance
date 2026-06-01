@@ -1,0 +1,9 @@
+# Linux override — adds camera and audio device passthrough
+# Usage: docker compose -f docker-compose.yml -f docker-compose.linux.yml up
+services:
+  handdance:
+    devices:
+      - /dev/video0:/dev/video0
+      - /dev/snd:/dev/snd
+    group_add:
+      - audio

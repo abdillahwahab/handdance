@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hand Dance — Rhythm Game</title>
+  <link rel="stylesheet" href="style.css?v=3" />
+</head>
+<body>
+
+<!-- ============================
+     MENU SCREEN
+============================= -->
+<div id="menu-screen" class="screen active">
+  <div class="menu-container">
+    <h1 class="game-title">HAND<span>DANCE</span></h1>
+    <p class="game-subtitle">Gerakkan tangan sesuai arah panah!</p>
+
+    <!-- Song selection -->
+    <div class="card">
+      <h2>Pilih Lagu</h2>
+      <select id="song-select">
+        <option value="">-- Memuat daftar lagu... --</option>
+      </select>
+
+      <div id="song-info" class="song-info hidden">
+        <span id="song-title-display">–</span>
+        <span class="divider">|</span>
+        <span id="song-bpm-display">–</span> BPM
+        <span class="divider">|</span>
+        <span id="song-notes-display">–</span> notes
+      </div>
+    </div>
+
+    <!-- Difficulty -->
+    <div class="card">
+      <h2>Kesulitan</h2>
+      <div class="difficulty-btns">
+        <button class="diff-btn" data-diff="easy">Easy</button>
+        <button class="diff-btn active" data-diff="medium">Medium</button>
+        <button class="diff-btn" data-diff="hard">Hard</button>
+      </div>
+    </div>
+
+    <!-- YouTube downloader -->
+    <div class="card">
+      <h2>Tambah Lagu dari YouTube</h2>
+      <div class="yt-row">
+        <input id="yt-url" type="text" placeholder="https://youtube.com/watch?v=..." />
+        <input id="yt-bpm" type="number" placeholder="BPM" min="60" max="250" value="120" />
+        <button id="yt-download-btn">Unduh</button>
+      </div>
+      <div id="yt-status" class="yt-status"></div>
+    </div>
+
+    <!-- Volume -->
+    <div class="card card-row">
+      <label for="volume-slider">Volume</label>
+      <input id="volume-slider" type="range" min="0" max="100" value="80" />
+      <span id="volume-val">80%</span>
+    </div>
+
+    <div class="card card-row">
+      <label for="debug-hands-toggle">Debug Hands</label>
+      <input id="debug-hands-toggle" type="checkbox" checked />
+      <span id="debug-hands-label">ON</span>
+    </div>
+
+    <button id="start-btn" class="btn-primary" disabled>MULAI MAIN</button>
+  </div>
+</div>
+
+<!-- ============================
+     GAME SCREEN
+============================= -->
+<div id="game-screen" class="screen">
+
+  <!-- Header bar -->
+  <div class="game-header">
+    <div class="song-label" id="playing-title">–</div>
+    <div class="score-display">
+      <span class="score-label">SCORE</span>
+      <span id="score-value">0</span>
+    </div>
+    <div class="combo-display">
+      <span class="combo-label">COMBO</span>
+      <span id="combo-value">0</span>
+    </div>
+    <button id="pause-btn" class="btn-sm">II</button>
+    <button id="quit-btn"  class="btn-sm">QUIT</button>
+  </div>
+
+  <!-- Main game area -->
+  <div class="game-area">
+
+    <!-- Camera preview (top-right) -->
+    <div class="cam-preview-wrapper">
+      <video id="cam-preview" autoplay playsinline muted poster="/video_feed"></video>
+      <canvas id="hands-overlay"></canvas>
+      <div class="cam-label">Camera</div>
+      <div id="cam-status" class="cam-status">Browser camera loading...</div>
+      <div id="gesture-status" class="gesture-status">Gesture: none</div>
+      <div id="hands-readout" class="hands-readout">
+        <span id="hands-count">hands: 0</span>
+        <span id="motion-value">motion: --</span>
+        <span id="command-value">command: --</span>
+      </div>
+    </div>
+
+    <!-- 4 note lanes -->
+    <div class="lanes" id="lanes">
+      <div class="lane" id="lane-left"  data-dir="left">
+        <div class="lane-label">&#8592;</div>
+        <div class="target-zone" id="target-left"></div>
+      </div>
+      <div class="lane" id="lane-down"  data-dir="down">
+        <div class="lane-label">&#8595;</div>
+        <div class="target-zone" id="target-down"></div>
+      </div>
+      <div class="lane" id="lane-up"    data-dir="up">
+        <div class="lane-label">&#8593;</div>
+        <div class="target-zone" id="target-up"></div>
+      </div>
+      <div class="lane" id="lane-right" data-dir="right">
+        <div class="lane-label">&#8594;</div>
+        <div class="target-zone" id="target-right"></div>
+      </div>
+    </div>
+
+    <!-- Judgment feedback -->
+    <div id="feedback-container" class="feedback-container"></div>
+
+  </div>
+
+  <!-- Accuracy bar at bottom -->
+  <div class="stats-bar">
+    <div class="stat"><span class="stat-label">PERFECT</span><span id="stat-perfect">0</span></div>
+    <div class="stat"><span class="stat-label">GOOD</span><span id="stat-good">0</span></div>
+    <div class="stat"><span class="stat-label">MISS</span><span id="stat-miss">0</span></div>
+    <div class="stat"><span class="stat-label">ACCURACY</span><span id="stat-accuracy">100%</span></div>
+    <div class="stat"><span class="stat-label">MAX COMBO</span><span id="stat-maxcombo">0</span></div>
+  </div>
+</div>
+
+<!-- ============================
+     RESULT SCREEN
+============================= -->
+<div id="result-screen" class="screen">
+  <div class="result-container">
+    <h1 id="result-rank" class="rank">S</h1>
+    <h2 id="result-title">–</h2>
+
+    <div class="result-grid">
+      <div class="res-box"><div class="res-label">SCORE</div><div id="res-score" class="res-val">0</div></div>
+      <div class="res-box"><div class="res-label">ACCURACY</div><div id="res-accuracy" class="res-val">0%</div></div>
+      <div class="res-box"><div class="res-label">MAX COMBO</div><div id="res-maxcombo" class="res-val">0</div></div>
+      <div class="res-box perfect-box"><div class="res-label">PERFECT</div><div id="res-perfect" class="res-val">0</div></div>
+      <div class="res-box good-box"><div class="res-label">GOOD</div><div id="res-good" class="res-val">0</div></div>
+      <div class="res-box miss-box"><div class="res-label">MISS</div><div id="res-miss" class="res-val">0</div></div>
+    </div>
+
+    <div class="result-btns">
+      <button id="retry-btn"  class="btn-primary">MAIN LAGI</button>
+      <button id="menu-btn"   class="btn-secondary">MENU</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============================
+     CONNECTION overlay
+============================= -->
+<div id="connecting-overlay" class="overlay">
+  <div class="overlay-box">
+    <div class="spinner"></div>
+    <p>Menghubungkan ke server...</p>
+  </div>
+</div>
+
+<script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.min.js"></script>
+<script src="script.js?v=4"></script>
+</body>
+</html>
