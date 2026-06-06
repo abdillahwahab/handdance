@@ -335,10 +335,6 @@ html, body {
   pointer-events: none;
 }
 
-#cam-preview.camera-fallback {
-  background: #111;
-  filter: grayscale(1) brightness(0.7);
-}
 .cam-label {
   position: absolute;
   top: 10px;

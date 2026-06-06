@@ -70,7 +70,6 @@ const ytBpm         = $("yt-bpm");
 const ytDownloadBtn = $("yt-download-btn");
 const ytStatus      = $("yt-status");
 const camPreview    = $("cam-preview");
-const camPreviewFallback = "/video_feed";
 const camStatus     = $("cam-status");
 const gestureStatus = $("gesture-status");
 const handsOverlay  = $("hands-overlay");
@@ -223,16 +222,13 @@ async function attachBrowserCamera() {
     });
     camPreview.srcObject = browserStream;
     streamVideo.srcObject = browserStream;
-    camPreview.classList.remove("camera-fallback");
     camStatus.textContent = "Browser camera active";
     await camPreview.play().catch(() => {});
     await streamVideo.play().catch(() => {});
   } catch (err) {
     console.warn("Camera access denied/unavailable:", err);
     camPreview.srcObject = null;
-    camPreview.src = camPreviewFallback;
-    camPreview.classList.add("camera-fallback");
-    camStatus.textContent = "Camera unavailable, showing fallback";
+    camStatus.textContent = "Camera unavailable";
   }
 }
 
