@@ -7,10 +7,8 @@ Routes:
   GET  /api/songs       → list available audio files
   GET  /api/beatmaps    → list available beatmaps
   GET  /video_feed      → MJPEG stream from hand-tracker camera (on-demand)
-  POST /api/download    → (yt-dlp) download audio from YouTube URL
 
 SocketIO events (server → client):
-  song_list        – list of songs + beatmaps
   game_started     – beatmap metadata when game begins
   note_spawn       – { id, direction, time_ms }
   note_update      – list of active notes with current y_px (60 Hz)
@@ -20,9 +18,8 @@ SocketIO events (server → client):
   error            – error message string
 
 SocketIO events (client → server):
-  start_game       – { audio_file, difficulty }
+  start_game       – { youtube_url, difficulty, bpm }
   stop_game        – stop current session
-  set_volume       – { volume: 0.0–1.0 }
 """
 
 # gevent monkey-patch MUST happen before any other import so that
@@ -34,9 +31,10 @@ import os
 import sys
 import logging
 import secrets
+import re
 import threading
 import time
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 from flask_socketio import SocketIO, emit
@@ -118,40 +116,19 @@ ip_connections: dict[str, int] = {}
 # Session limits
 MAX_SESSIONS = int(os.environ.get("MAX_SESSIONS", "50"))
 MAX_SESSIONS_PER_IP = int(os.environ.get("MAX_SESSIONS_PER_IP", "3"))
-MAX_REQUEST_BODY_BYTES = int(os.environ.get("MAX_REQUEST_BODY_MB", "1")) * 1024 * 1024
-
 # ------------------------------------------------------------------
-# YouTube domain allowlist (mitigates SSRF / bandwidth abuse)
+# YouTube video ID extraction
 # ------------------------------------------------------------------
-ALLOWED_YT_DOMAINS = {
-    "youtube.com", "www.youtube.com", "m.youtube.com",
-    "music.youtube.com",
-    "youtu.be",
-    "youtube-nocookie.com",
-}
+YT_URL_PATTERN = re.compile(
+    r"(?:https?://)?"
+    r"(?:www\.)?"
+    r"(?:youtube\.com/(?:watch\?v=|embed/|shorts/)|youtu\.be/)"
+    r"([a-zA-Z0-9_-]{11})"
+)
 
-def _is_allowed_youtube_url(url: str) -> bool:
-    try:
-        parsed = urlparse(url)
-        return parsed.netloc in ALLOWED_YT_DOMAINS and parsed.scheme in ("http", "https")
-    except Exception:
-        return False
-
-def _check_music_dir_capacity() -> tuple[bool, str]:
-    """Return (ok, message). Refuse download if directory exceeds limit."""
-    max_mb = int(os.environ.get("MAX_MUSIC_DIR_MB", "500"))
-    try:
-        total = sum(
-            os.path.getsize(os.path.join(MUSIC_DIR, f))
-            for f in os.listdir(MUSIC_DIR)
-            if os.path.isfile(os.path.join(MUSIC_DIR, f))
-        )
-        total_mb = total / (1024 * 1024)
-        if total_mb >= max_mb:
-            return False, f"Music dir full ({total_mb:.0f}MB ≥ {max_mb}MB limit)"
-        return True, ""
-    except FileNotFoundError:
-        return True, ""
+def _extract_youtube_video_id(url: str) -> str | None:
+    m = YT_URL_PATTERN.search(url.strip())
+    return m.group(1) if m else None
 
 # ------------------------------------------------------------------
 # HTTP routes
@@ -213,89 +190,7 @@ def video_feed():
         mimetype="multipart/x-mixed-replace; boundary=frame",
     )
 
-@app.route("/api/download", methods=["POST"])
-@limiter.limit("5 per minute")
-def api_download():
-    """Download audio from a YouTube URL using yt-dlp."""
-    if request.content_length and request.content_length > MAX_REQUEST_BODY_BYTES:
-        return jsonify({"error": "Request body too large."}), 413
-    data = request.get_json(force=True)
-    url  = data.get("url", "").strip()
-    bpm  = float(data.get("bpm", 120))
 
-    if not url:
-        return jsonify({"error": "No URL provided."}), 400
-
-    if not _is_allowed_youtube_url(url):
-        return jsonify({"error": "Only YouTube URLs are allowed."}), 403
-
-    ok, msg = _check_music_dir_capacity()
-    if not ok:
-        return jsonify({"error": msg}), 413
-
-    try:
-        import yt_dlp  # type: ignore
-    except ImportError:
-        return jsonify({"error": "yt-dlp not installed."}), 501
-
-    out_template = os.path.join(MUSIC_DIR, "%(id)s.%(ext)s")
-    ydl_opts = {
-        "format":           "bestaudio/best",
-        "outtmpl":          out_template,
-        "noplaylist":       True,
-        "quiet":            True,
-        "restrictfilenames": True,
-        "postprocessors": [{
-            "key":            "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }],
-    }
-
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            title    = info.get("title", "unknown")
-            video_id = info.get("id", "unknown")
-            filename = video_id + ".mp3"
-
-        # Auto-generate beatmap
-        duration_ms = info.get("duration", 180) * 1000
-        bm = beatmap_parser.generate_auto_beatmap(
-            audio_filename=filename,
-            bpm=bpm,
-            duration_ms=duration_ms,
-        )
-        _save_auto_beatmap(bm, filename, title=title)
-
-        # Notify all clients
-        socketio.emit("song_list", _build_song_list())
-        return jsonify({"success": True, "filename": filename, "title": title})
-
-    except Exception as exc:
-        logger.error("yt-dlp error: %s", exc)
-        return jsonify({"error": "Download failed."}), 500
-
-
-def _save_auto_beatmap(bm, audio_filename: str, title: str | None = None):
-    """Persist an auto-generated beatmap as JSON."""
-    import json
-    stem = os.path.splitext(audio_filename)[0]
-    path = os.path.join(BEATMAP_DIR, stem + ".json")
-    os.makedirs(BEATMAP_DIR, exist_ok=True)
-    data = {
-        "title":      title or bm.title,
-        "artist":     bm.artist,
-        "audio_file": bm.audio_file,
-        "bpm":        bm.bpm,
-        "offset":     bm.offset_ms / 1000,
-        "difficulty": bm.difficulty,
-        "notes":      [{"time": n.time_ms / 1000, "direction": n.direction}
-                       for n in bm.notes],
-    }
-    with open(path, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2, ensure_ascii=False)
-    logger.info("Auto-beatmap saved: %s", path)
 
 
 def _build_song_list():
@@ -376,19 +271,14 @@ def on_disconnect():
 @socketio.on("start_game")
 def on_start_game(data):
     sid = request.sid
-
-    requested_audio = str(data.get("audio_file", ""))
-    audio_file = _resolve_audio_filename(requested_audio)
     difficulty = data.get("difficulty", "medium")
     bpm_override = float(data.get("bpm", 0))
 
-    # Check global session limit
     if len(sessions) >= MAX_SESSIONS:
         emit("error", "Server is full. Try again later.")
         logger.warning("Session rejected: server full (%d)", MAX_SESSIONS)
         return
 
-    # Stop existing session for this client, if any
     existing = sessions.pop(sid, None)
     if existing:
         existing.stop()
@@ -396,41 +286,55 @@ def on_start_game(data):
     client_clock_started[sid] = time.time() * 1000
     client_clocks[sid] = 0.0
 
-    # Verify file exists in mounted music folder. Playback happens in browser.
-    if not audio_file:
-        emit("error", f"Cannot load audio file: {requested_audio}")
-        return
+    video_id = None
+    youtube_url = str(data.get("youtube_url", "")).strip()
 
-    # Get duration for this session without touching shared audio_manager state.
-    # Browser handles real playback; we just need end-of-song detection.
-    duration_ms = 180_000
-    audio_path = os.path.join(MUSIC_DIR, audio_file)
-    if os.path.isfile(audio_path):
-        try:
-            from mutagen import File as MutagenFile
-            af = MutagenFile(audio_path)
-            if af is not None and af.info:
-                duration_ms = af.info.length * 1000
-        except Exception:
-            pass
-
-    # Load or auto-generate beatmap
-    beatmap = beatmap_parser.load_for_audio(audio_file)
-    if beatmap is None:
+    if youtube_url:
+        video_id = _extract_youtube_video_id(youtube_url)
+        if not video_id:
+            emit("error", "Invalid YouTube URL")
+            return
         bpm = bpm_override or 120
-        logger.info("No beatmap found for '%s', auto-generating (BPM=%.0f).", audio_file, bpm)
+        duration_ms = 300_000
         beatmap = beatmap_parser.generate_auto_beatmap(
-            audio_filename=audio_file,
+            audio_filename=f"youtube_{video_id}",
             bpm=bpm,
             duration_ms=duration_ms,
             difficulty=difficulty,
         )
+        logger.info("YouTube game: video=%s BPM=%.0f", video_id, bpm)
     else:
-        # Beatmap gives more accurate end time than audio file
-        last_note_ms = max(n.time_ms for n in beatmap.notes)
-        duration_ms = max(duration_ms, last_note_ms + 2000)
+        requested_audio = str(data.get("audio_file", ""))
+        audio_file = _resolve_audio_filename(requested_audio)
+        if not audio_file:
+            emit("error", f"Cannot load audio file: {requested_audio}")
+            return
 
-    # SocketIO callbacks emit to THIS client only
+        duration_ms = 180_000
+        audio_path = os.path.join(MUSIC_DIR, audio_file)
+        if os.path.isfile(audio_path):
+            try:
+                from mutagen import File as MutagenFile
+                af = MutagenFile(audio_path)
+                if af is not None and af.info:
+                    duration_ms = af.info.length * 1000
+            except Exception:
+                pass
+
+        beatmap = beatmap_parser.load_for_audio(audio_file)
+        if beatmap is None:
+            bpm = bpm_override or 120
+            logger.info("No beatmap found for '%s', auto-generating (BPM=%.0f).", audio_file, bpm)
+            beatmap = beatmap_parser.generate_auto_beatmap(
+                audio_filename=audio_file,
+                bpm=bpm,
+                duration_ms=duration_ms,
+                difficulty=difficulty,
+            )
+        else:
+            last_note_ms = max(n.time_ms for n in beatmap.notes)
+            duration_ms = max(duration_ms, last_note_ms + 2000)
+
     def on_note_spawn(note: dict):
         socketio.emit("note_spawn", note, to=sid)
 
@@ -441,7 +345,6 @@ def on_start_game(data):
     def on_game_end(state: dict):
         socketio.emit("game_over", state, to=sid)
 
-    # Create and start session
     session = GameSession(
         beatmap       = beatmap,
         audio_manager = audio_manager,
@@ -455,17 +358,19 @@ def on_start_game(data):
     session.set_external_clock(lambda: client_clocks.get(sid, 0.0))
     session.start()
 
-    # Confirm to client
-    emit("game_started", {
+    response = {
         "beatmap":   beatmap.to_dict(),
         "scroll_px": 360,
         "height_px": 680,
         "judgment_px": 580,
         "server_start_ms": client_clock_started.get(sid, 0.0),
-    })
-    logger.info("Game started: '%s' (%s) [sid=%s ip=%s]", audio_file, difficulty, sid, request.remote_addr)
+    }
+    if video_id:
+        response["video_id"] = video_id
 
-    # Kick off note-position push thread (scoped to this SID)
+    emit("game_started", response)
+    logger.info("Game started: %s (%s) [sid=%s]", video_id or audio_file, difficulty, sid)
+
     _start_note_push_thread(session, sid)
 
 
@@ -479,6 +384,15 @@ def _start_note_push_thread(session: GameSession, sid: str):
 
     t = threading.Thread(target=pusher, daemon=True, name=f"NotePusher-{sid}")
     t.start()
+
+
+@socketio.on("finish_game")
+def on_finish_game():
+    sid = request.sid
+    session = sessions.get(sid)
+    if session:
+        session.finish()
+    logger.info("Game finished by client (YouTube ended) [sid=%s ip=%s].", sid, request.remote_addr)
 
 
 @socketio.on("stop_game")

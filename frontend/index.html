@@ -16,19 +16,12 @@
     <h1 class="game-title">HAND<span>DANCE</span></h1>
     <p class="game-subtitle">Gerakkan tangan sesuai arah panah!</p>
 
-    <!-- Song selection -->
+    <!-- YouTube URL -->
     <div class="card">
-      <h2>Pilih Lagu</h2>
-      <select id="song-select">
-        <option value="">-- Memuat daftar lagu... --</option>
-      </select>
-
-      <div id="song-info" class="song-info hidden">
-        <span id="song-title-display">–</span>
-        <span class="divider">|</span>
-        <span id="song-bpm-display">–</span> BPM
-        <span class="divider">|</span>
-        <span id="song-notes-display">–</span> notes
+      <h2>Link YouTube</h2>
+      <div class="yt-row">
+        <input id="yt-url" type="text" placeholder="https://youtube.com/watch?v=..." />
+        <input id="yt-bpm" type="number" placeholder="BPM" min="60" max="250" value="120" />
       </div>
     </div>
 
@@ -40,17 +33,6 @@
         <button class="diff-btn active" data-diff="medium">Medium</button>
         <button class="diff-btn" data-diff="hard">Hard</button>
       </div>
-    </div>
-
-    <!-- YouTube downloader -->
-    <div class="card">
-      <h2>Tambah Lagu dari YouTube</h2>
-      <div class="yt-row">
-        <input id="yt-url" type="text" placeholder="https://youtube.com/watch?v=..." />
-        <input id="yt-bpm" type="number" placeholder="BPM" min="60" max="250" value="120" />
-        <button id="yt-download-btn">Unduh</button>
-      </div>
-      <div id="yt-status" class="yt-status"></div>
     </div>
 
     <!-- Volume -->
@@ -66,7 +48,7 @@
       <span id="debug-hands-label">ON</span>
     </div>
 
-    <button id="start-btn" class="btn-primary" disabled>MULAI MAIN</button>
+    <button id="start-btn" class="btn-primary">MULAI MAIN</button>
   </div>
 </div>
 
@@ -130,6 +112,11 @@
     <!-- Judgment feedback -->
     <div id="feedback-container" class="feedback-container"></div>
 
+    <!-- YouTube embed (hidden) -->
+    <div id="yt-player-wrapper">
+      <div id="yt-player"></div>
+    </div>
+
   </div>
 
   <!-- Accuracy bar at bottom -->
@@ -182,6 +169,7 @@
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose/pose.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.min.js"></script>
-<script src="script.js?v=4"></script>
+<script src="https://www.youtube.com/iframe_api"></script>
+<script src="script.js?v=5"></script>
 </body>
 </html>

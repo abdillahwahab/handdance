@@ -28,7 +28,6 @@ const DIRECTION_TARGET = { left: "target-left", down: "target-down", up: "target
 // State
 // ─────────────────────────────────────────────────────────────────
 let socket         = null;
-let currentSong    = null;   // selected song entry
 let selectedDiff   = "medium";
 let noteElements   = {};     // noteId → <div>
 let rafId          = null;   // requestAnimationFrame handle
@@ -43,6 +42,9 @@ let gameStartPerf = 0;
 let noteRenderId = null;
 let debugHandsEnabled = true;
 let lastHold = null;
+let ytPlayer = null;
+let ytVideoId = null;
+let ytPlayerReady = false;
 
 // ─────────────────────────────────────────────────────────────────
 // DOM references
@@ -57,18 +59,11 @@ const screens = {
 const connectingOverlay = $("connecting-overlay");
 
 // Menu
-const songSelect    = $("song-select");
-const songInfo      = $("song-info");
-const titleDisplay  = $("song-title-display");
-const bpmDisplay    = $("song-bpm-display");
-const notesDisplay  = $("song-notes-display");
 const startBtn      = $("start-btn");
 const volumeSlider  = $("volume-slider");
 const volumeVal     = $("volume-val");
 const ytUrl         = $("yt-url");
 const ytBpm         = $("yt-bpm");
-const ytDownloadBtn = $("yt-download-btn");
-const ytStatus      = $("yt-status");
 const camPreview    = $("cam-preview");
 const camStatus     = $("cam-status");
 const gestureStatus = $("gesture-status");
@@ -143,11 +138,6 @@ function initSocket() {
     connectingOverlay.querySelector("p").textContent = `Error: ${err.message}`;
   });
 
-  // Song list refresh
-  socket.on("song_list", songs => {
-    populateSongList(songs);
-  });
-
   // Game started confirmation
   socket.on("game_started", async (data) => {
     isGameActive = true;
@@ -156,9 +146,12 @@ function initSocket() {
     gameStartPerf = performance.now();
     ensureAllNotesRendered(data.beatmap);
     await attachBrowserCamera();
-    await playBrowserAudio();
     await startBrowserHands();
     startNoteRenderLoop();
+    if (data.video_id) {
+      initYouTubePlayer(data.video_id);
+      playingTitle.textContent = "YouTube: " + data.video_id;
+    }
   });
 
   // New note spawned
@@ -194,6 +187,7 @@ function initSocket() {
     if (browserCamera) { cancelAnimationFrame(browserCamera); browserCamera = null; }
     browserPose = null;
     handsCtx.clearRect(0, 0, handsOverlay.width, handsOverlay.height);
+    stopYouTubePlayer();
     showResult(state);
   });
 
@@ -254,7 +248,7 @@ async function startBrowserHands() {
   });
 
   let lastClockSent = 0;
-  let lastHold = null;
+let lastHold = null;
 
   browserPose.onResults((results) => {
     const now = performance.now();
@@ -405,82 +399,61 @@ function startNoteRenderLoop() {
   noteRenderId = requestAnimationFrame(render);
 }
 
-async function playBrowserAudio() {
-  if (!currentSong) return;
-  const audioUrl = `/music/${encodeURIComponent(currentSong.audio_file)}`;
+// ─────────────────────────────────────────────────────────────────
+// YouTube embed player
+// ─────────────────────────────────────────────────────────────────
 
-  if (browserAudio) {
-    browserAudio.pause();
-    browserAudio = null;
-  }
-
-  browserAudio = new Audio(audioUrl);
-  browserAudio.preload = "auto";
-  browserAudio.crossOrigin = "anonymous";
-
-  try {
-    await browserAudio.play();
-  } catch (err) {
-    console.warn("Browser audio play failed:", err);
-  }
+function onYouTubeIframeAPIReady() {
+  console.log("[HandDance] YouTube IFrame API ready");
 }
 
-// ─────────────────────────────────────────────────────────────────
-// Song list
-// ─────────────────────────────────────────────────────────────────
-let _songs = [];
-
-function populateSongList(songs) {
-  _songs = songs;
-  const prev = songSelect.value;
-  songSelect.innerHTML = "";
-
-  if (!songs || songs.length === 0) {
-    const opt = document.createElement("option");
-    opt.value = "";
-    opt.textContent = "-- Tidak ada lagu. Tambah via YouTube --";
-    songSelect.appendChild(opt);
-    startBtn.disabled = true;
+function initYouTubePlayer(videoId) {
+  if (ytPlayer) {
+    ytPlayer.loadVideoById(videoId);
+    ytPlayer.seekTo(0);
+    ytPlayer.playVideo();
+    ytVideoId = videoId;
     return;
   }
-
-  songs.forEach(song => {
-    const opt = document.createElement("option");
-    opt.value = song.audio_file;
-    const hasBM = song.has_beatmap ? "" : " (auto)";
-    opt.textContent = (song.title || song.audio_file) + hasBM;
-    songSelect.appendChild(opt);
+  ytVideoId = videoId;
+  ytPlayer = new YT.Player("yt-player", {
+    videoId,
+    height: 1,
+    width: 1,
+    playerVars: {
+      autoplay: 1,
+      controls: 0,
+      disablekb: 1,
+      fs: 0,
+      modestbranding: 1,
+      rel: 0,
+      iv_load_policy: 3,
+      playsinline: 1,
+    },
+    events: {
+      onReady: () => {
+        ytPlayerReady = true;
+        ytPlayer.playVideo();
+        ytPlayer.setVolume(parseInt(volumeSlider.value));
+      },
+      onStateChange: (e) => {
+        console.log("YT state:", e.data, "active:", isGameActive);
+        if (e.data === YT.PlayerState.ENDED && isGameActive) {
+          console.log("YT ended — emitting finish_game");
+          socket.emit("finish_game");
+        }
+      },
+    },
   });
-
-  // Restore previous selection if still available
-  if (prev && [...songSelect.options].some(o => o.value === prev)) {
-    songSelect.value = prev;
-  }
-
-  onSongChange();
-  startBtn.disabled = !songSelect.value;
 }
 
-function onSongChange() {
-  const val  = songSelect.value;
-  const song = _songs.find(s => s.audio_file === val);
-  currentSong = song || null;
-
-  if (song && song.has_beatmap) {
-    titleDisplay.textContent  = song.title  || val;
-    bpmDisplay.textContent    = song.bpm    || "–";
-    notesDisplay.textContent  = song.note_count || "–";
-    songInfo.classList.remove("hidden");
-  } else if (song) {
-    titleDisplay.textContent  = song.audio_file;
-    bpmDisplay.textContent    = "auto";
-    notesDisplay.textContent  = "auto";
-    songInfo.classList.remove("hidden");
-  } else {
-    songInfo.classList.add("hidden");
+function stopYouTubePlayer() {
+  if (ytPlayer && ytPlayer.destroy) {
+    ytPlayer.destroy();
   }
-
-  startBtn.disabled = !val;
+  ytPlayer = null;
+  ytPlayerReady = false;
+  ytVideoId = null;
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -613,9 +586,7 @@ function showResult(state) {
 
   resultRank.textContent = rankChar;
   resultRank.className   = `rank ${rankClass}`;
-  resultTitle.textContent = currentSong
-    ? (currentSong.title || currentSong.audio_file)
-    : "–";
+  resultTitle.textContent = ytVideoId ? "YouTube: " + ytVideoId : "–";
 
   resScore.textContent    = state.score;
   resAccuracy.textContent = acc + "%";
@@ -653,22 +624,19 @@ function wireEvents() {
     });
   });
 
-  // Song select change
-  songSelect.addEventListener("change", onSongChange);
-
   // Volume
   volumeSlider.addEventListener("input", () => {
     const v = volumeSlider.value;
     volumeVal.textContent = v + "%";
-    if (socket && socket.connected) {
-      socket.emit("set_volume", { volume: v / 100 });
+    if (ytPlayer && ytPlayer.setVolume) {
+      ytPlayer.setVolume(parseInt(v));
     }
   });
 
   // Start button
   startBtn.addEventListener("click", () => {
-    const file = songSelect.value;
-    if (!file) return;
+    const url = ytUrl.value.trim();
+    if (!url) return;
 
     // Reset game display
     scoreValue.textContent  = "0";
@@ -683,15 +651,14 @@ function wireEvents() {
     noteElements = {};
     feedbackCont.innerHTML = "";
 
-    playingTitle.textContent = currentSong
-      ? (currentSong.title || currentSong.audio_file)
-      : file;
+    playingTitle.textContent = url;
 
     camStatus.textContent = "Starting...";
 
     // Clean up previous game resources
     if (browserCamera) { cancelAnimationFrame(browserCamera); browserCamera = null; }
     browserPose = null;
+    stopYouTubePlayer();
     if (browserStream) {
       browserStream.getTracks().forEach(t => t.stop());
       browserStream = null;
@@ -704,13 +671,10 @@ function wireEvents() {
       browserAudio = null;
     }
 
-    // Start audio immediately on user gesture, then sync the game state.
-    playBrowserAudio();
-
     socket.emit("start_game", {
-      audio_file: file,
+      youtube_url: url,
       difficulty: selectedDiff,
-      bpm: currentSong && currentSong.bpm ? currentSong.bpm : 120,
+      bpm: parseFloat(ytBpm.value) || 120,
     });
 
     showScreen("game");
@@ -728,6 +692,7 @@ function wireEvents() {
   quitBtn.addEventListener("click", () => {
     socket.emit("stop_game");
     clearAllNotes();
+    stopYouTubePlayer();
     if (browserStream) {
       browserStream.getTracks().forEach(t => t.stop());
       browserStream = null;
@@ -756,6 +721,7 @@ function wireEvents() {
 
   // Result: Menu
   menuBtn.addEventListener("click", () => {
+    stopYouTubePlayer();
     if (browserStream) {
       browserStream.getTracks().forEach(t => t.stop());
       browserStream = null;
@@ -768,38 +734,6 @@ function wireEvents() {
     showScreen("menu");
   });
 
-  // YouTube download
-  ytDownloadBtn.addEventListener("click", async () => {
-    const url = ytUrl.value.trim();
-    if (!url) { showYtStatus("Masukkan URL YouTube.", "err"); return; }
-
-    ytDownloadBtn.disabled = true;
-    showYtStatus("Mengunduh audio… harap tunggu.", "loading");
-
-    try {
-      const res  = await fetch("/api/download", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ url, bpm: parseFloat(ytBpm.value) || 120 }),
-      });
-      const data = await res.json();
-      if (data.error) {
-        showYtStatus("Error: " + data.error, "err");
-      } else {
-        showYtStatus(`Berhasil: "${data.title}" ditambahkan!`, "ok");
-        ytUrl.value = "";
-      }
-    } catch (e) {
-      showYtStatus("Koneksi gagal: " + e.message, "err");
-    } finally {
-      ytDownloadBtn.disabled = false;
-    }
-  });
-}
-
-function showYtStatus(msg, cls) {
-  ytStatus.textContent = msg;
-  ytStatus.className = "yt-status " + cls;
 }
 
 // ─────────────────────────────────────────────────────────────────

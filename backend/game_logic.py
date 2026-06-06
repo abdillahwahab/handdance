@@ -157,6 +157,12 @@ class GameSession:
         """Override game time source. Clock must return ms from song start."""
         self._external_clock = clock
 
+    def finish(self):
+        """End game: push clock past duration so the loop auto-misses remaining notes then _finish()."""
+        self._duration_ms = self._now_ms()
+        with self._lock:
+            self._spawn_idx = len(self._notes)
+
     def stop(self):
         self._running = False
         if self._external_clock is None:

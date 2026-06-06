@@ -7,6 +7,7 @@ FROM python:3.11-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
       # OpenCV headless runtime
       libglib2.0-0 \
+      libgl1 \
       libsm6 \
       libxext6 \
       libxrender1 \
@@ -15,10 +16,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libsdl2-mixer-2.0-0 \
       libasound2 \
       pulseaudio-utils \
-      # ffmpeg + ffprobe — required by yt-dlp for audio extraction
-      ffmpeg \
-      # Node.js — yt-dlp JS runtime for YouTube format extraction
-      nodejs \
       # Build tools for pip wheels that need compilation
       gcc \
       python3-dev \
@@ -29,9 +26,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt
-
-# ── Upgrade yt-dlp to latest (mitigates known CVEs) ───────────────
-RUN pip install --no-cache-dir --upgrade yt-dlp
 
 # ── Application code ───────────────────────────────────────────────
 COPY backend/  /app/backend/
