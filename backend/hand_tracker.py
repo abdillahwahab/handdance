@@ -5,7 +5,6 @@ Runs in its own thread, pushes gestures to a thread-safe queue.
 """
 
 import cv2
-import mediapipe as mp
 import threading
 import time
 import queue
@@ -54,14 +53,23 @@ class HandTracker:
         self._prev_positions: dict[int, tuple[float, float]] = {}
         self._prev_time: float = 0.0
 
-        # MediaPipe setup
-        self._mp_hands = mp.solutions.hands
-        self._hands = self._mp_hands.Hands(
-            static_image_mode=False,
-            max_num_hands=max_hands,
-            min_detection_confidence=0.6,
-            min_tracking_confidence=0.5,
-        )
+        # MediaPipe setup (non-fatal if unavailable)
+        self._mp_ok = False
+        self._mp_hands = None
+        self._hands = None
+        try:
+            import mediapipe as mp
+            self._mp_hands = mp.solutions.hands
+            self._hands = self._mp_hands.Hands(
+                static_image_mode=False,
+                max_num_hands=max_hands,
+                min_detection_confidence=0.6,
+                min_tracking_confidence=0.5,
+            )
+            self._mp_ok = True
+            logger.info("MediaPipe hands initialised.")
+        except Exception as exc:
+            logger.warning("MediaPipe init failed: %s — hand tracking disabled.", exc)
 
         # Camera preview toggle (shows annotated webcam window when True)
         self.show_preview = False
@@ -93,7 +101,8 @@ class HandTracker:
         self._running = False
         if self._thread:
             self._thread.join(timeout=3)
-        self._hands.close()
+        if self._mp_ok and self._hands:
+            self._hands.close()
         logger.info("HandTracker stopped.")
 
     def get_gesture(self, block: bool = False, timeout: float = 0.05):
@@ -179,7 +188,9 @@ class HandTracker:
         self._latest_jpeg = None
         self._prev_time = time.time()
 
-        mp_draw = mp.solutions.drawing_utils
+        if self._mp_ok:
+            import mediapipe as mp
+            mp_draw = mp.solutions.drawing_utils
 
         while self._running:
             ret, frame = cap.read()
@@ -193,48 +204,41 @@ class HandTracker:
             if dt <= 0:
                 dt = 1e-6
 
-            # Flip horizontally for mirror effect
             frame = cv2.flip(frame, 1)
-            rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = self._hands.process(rgb)
-
             annotated = frame.copy()
 
-            if results.multi_hand_landmarks:
-                for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
-                    # Draw skeleton
-                    mp_draw.draw_landmarks(
-                        annotated,
-                        hand_landmarks,
-                        self._mp_hands.HAND_CONNECTIONS,
-                    )
+            if self._mp_ok:
+                rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = self._hands.process(rgb)
 
-                    # Wrist landmark (index 0)
-                    wrist = hand_landmarks.landmark[0]
-                    cx, cy = wrist.x, wrist.y  # normalised [0,1]
+                if results.multi_hand_landmarks:
+                    for idx, hand_landmarks in enumerate(results.multi_hand_landmarks):
+                        mp_draw.draw_landmarks(
+                            annotated,
+                            hand_landmarks,
+                            self._mp_hands.HAND_CONNECTIONS,
+                        )
 
-                    prev = self._prev_positions.get(idx)
-                    if prev is not None:
-                        dx = cx - prev[0]
-                        dy = cy - prev[1]
+                        wrist = hand_landmarks.landmark[0]
+                        cx, cy = wrist.x, wrist.y
 
-                        # Scale dx/dy by frame rate to get velocity per second
-                        vx = dx / dt
-                        vy = dy / dt
+                        prev = self._prev_positions.get(idx)
+                        if prev is not None:
+                            dx = cx - prev[0]
+                            dy = cy - prev[1]
+                            vx = dx / dt
+                            vy = dy / dt
+                            direction = self._classify_swipe(vx, vy)
+                            if direction:
+                                self._emit_gesture(direction, now)
 
-                        direction = self._classify_swipe(vx, vy)
-                        if direction:
-                            self._emit_gesture(direction, now)
+                        self._prev_positions[idx] = (cx, cy)
 
-                    self._prev_positions[idx] = (cx, cy)
-
-            # Clean up stale hand positions
-            if not results.multi_hand_landmarks:
-                self._prev_positions.clear()
+                if not results.multi_hand_landmarks:
+                    self._prev_positions.clear()
 
             self._prev_time = now
 
-            # Visual: draw gesture indicators on annotated frame
             self._draw_hud(annotated)
 
             # Encode frame to JPEG only when at least one client is watching
