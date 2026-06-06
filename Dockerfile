@@ -30,6 +30,9 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt
 
+# ── Upgrade yt-dlp to latest (mitigates known CVEs) ───────────────
+RUN pip install --no-cache-dir --upgrade yt-dlp
+
 # ── Application code ───────────────────────────────────────────────
 COPY backend/  /app/backend/
 COPY frontend/ /app/frontend/

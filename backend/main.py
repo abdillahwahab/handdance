@@ -6,7 +6,7 @@ Routes:
   GET  /static/<path>   → frontend static files
   GET  /api/songs       → list available audio files
   GET  /api/beatmaps    → list available beatmaps
-  GET  /video_feed      → MJPEG stream from hand-tracker camera
+  GET  /video_feed      → MJPEG stream from hand-tracker camera (on-demand)
   POST /api/download    → (yt-dlp) download audio from YouTube URL
 
 SocketIO events (server → client):
@@ -33,12 +33,15 @@ monkey.patch_all()
 import os
 import sys
 import logging
+import secrets
 import threading
 import time
-from urllib.parse import unquote
+from urllib.parse import unquote, urlparse
 
 from flask import Flask, Response, jsonify, request, send_from_directory
 from flask_socketio import SocketIO, emit
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 
 # Resolve paths relative to this file so imports work inside Docker
 BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
@@ -71,13 +74,29 @@ app = Flask(
     static_folder   = FRONT_DIR,
     static_url_path = "/static",
 )
-app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "dance-hand-secret")
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
+
+cors_origin_str = os.environ.get("CORS_ORIGIN", "http://localhost:5001")
+cors_allowed_origins = (
+    [o.strip() for o in cors_origin_str.split(",")]
+    if "," in cors_origin_str
+    else cors_origin_str
+)
+
 socketio = SocketIO(
     app,
-    cors_allowed_origins = "*",
+    cors_allowed_origins = cors_allowed_origins,
     async_mode          = "gevent",
     logger              = False,
     engineio_logger     = False,
+)
+
+# Rate limiter (in-memory, no external dep needed)
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["200 per day", "50 per hour"],
+    storage_uri="memory://",
 )
 
 # ------------------------------------------------------------------
@@ -90,10 +109,49 @@ hand_tracker   = HandTracker(
 audio_manager  = AudioManager(music_dir=MUSIC_DIR)
 beatmap_parser = BeatmapParser(beatmap_dir=BEATMAP_DIR)
 
-current_session: GameSession | None = None
-session_lock = threading.Lock()
-client_clock_ms: float = 0.0
-client_clock_started_at: float = 0.0
+# Multi-session support: each SocketIO SID maps to its own game session + clock
+sessions: dict[str, GameSession] = {}
+client_clocks: dict[str, float] = {}
+client_clock_started: dict[str, float] = {}
+ip_connections: dict[str, int] = {}
+
+# Session limits
+MAX_SESSIONS = int(os.environ.get("MAX_SESSIONS", "50"))
+MAX_SESSIONS_PER_IP = int(os.environ.get("MAX_SESSIONS_PER_IP", "3"))
+MAX_REQUEST_BODY_BYTES = int(os.environ.get("MAX_REQUEST_BODY_MB", "1")) * 1024 * 1024
+
+# ------------------------------------------------------------------
+# YouTube domain allowlist (mitigates SSRF / bandwidth abuse)
+# ------------------------------------------------------------------
+ALLOWED_YT_DOMAINS = {
+    "youtube.com", "www.youtube.com", "m.youtube.com",
+    "music.youtube.com",
+    "youtu.be",
+    "youtube-nocookie.com",
+}
+
+def _is_allowed_youtube_url(url: str) -> bool:
+    try:
+        parsed = urlparse(url)
+        return parsed.netloc in ALLOWED_YT_DOMAINS and parsed.scheme in ("http", "https")
+    except Exception:
+        return False
+
+def _check_music_dir_capacity() -> tuple[bool, str]:
+    """Return (ok, message). Refuse download if directory exceeds limit."""
+    max_mb = int(os.environ.get("MAX_MUSIC_DIR_MB", "500"))
+    try:
+        total = sum(
+            os.path.getsize(os.path.join(MUSIC_DIR, f))
+            for f in os.listdir(MUSIC_DIR)
+            if os.path.isfile(os.path.join(MUSIC_DIR, f))
+        )
+        total_mb = total / (1024 * 1024)
+        if total_mb >= max_mb:
+            return False, f"Music dir full ({total_mb:.0f}MB ≥ {max_mb}MB limit)"
+        return True, ""
+    except FileNotFoundError:
+        return True, ""
 
 # ------------------------------------------------------------------
 # HTTP routes
@@ -108,6 +166,7 @@ def static_files(filename):
     return send_from_directory(FRONT_DIR, filename)
 
 @app.route("/api/songs")
+@limiter.limit("30 per minute")
 def api_songs():
     songs    = audio_manager.list_songs()
     beatmaps = {bm["audio_file"]: bm for bm in beatmap_parser.list_beatmaps()}
@@ -121,27 +180,33 @@ def api_songs():
 
 
 @app.route("/music/<path:filename>")
+@limiter.limit("60 per minute")
 def music_file(filename):
     return send_from_directory(MUSIC_DIR, filename)
 
 @app.route("/api/beatmaps")
+@limiter.limit("30 per minute")
 def api_beatmaps():
     return jsonify(beatmap_parser.list_beatmaps())
 
 @app.route("/video_feed")
 def video_feed():
-    """MJPEG stream of the annotated camera frame."""
+    """MJPEG stream — only encodes frames while at least one client is connected."""
+    client_id = hand_tracker.subscribe_feed()
     def generate():
-        while True:
-            jpeg = hand_tracker.get_frame_jpeg()
-            if jpeg:
-                yield (
-                    b"--frame\r\n"
-                    b"Content-Type: image/jpeg\r\n\r\n"
-                    + jpeg
-                    + b"\r\n"
-                )
-            time.sleep(1 / 30)
+        try:
+            while True:
+                jpeg = hand_tracker.get_frame_jpeg()
+                if jpeg:
+                    yield (
+                        b"--frame\r\n"
+                        b"Content-Type: image/jpeg\r\n\r\n"
+                        + jpeg
+                        + b"\r\n"
+                    )
+                time.sleep(1 / 30)
+        finally:
+            hand_tracker.unsubscribe_feed(client_id)
 
     return Response(
         generate(),
@@ -149,14 +214,24 @@ def video_feed():
     )
 
 @app.route("/api/download", methods=["POST"])
+@limiter.limit("5 per minute")
 def api_download():
     """Download audio from a YouTube URL using yt-dlp."""
+    if request.content_length and request.content_length > MAX_REQUEST_BODY_BYTES:
+        return jsonify({"error": "Request body too large."}), 413
     data = request.get_json(force=True)
     url  = data.get("url", "").strip()
     bpm  = float(data.get("bpm", 120))
 
     if not url:
         return jsonify({"error": "No URL provided."}), 400
+
+    if not _is_allowed_youtube_url(url):
+        return jsonify({"error": "Only YouTube URLs are allowed."}), 403
+
+    ok, msg = _check_music_dir_capacity()
+    if not ok:
+        return jsonify({"error": msg}), 413
 
     try:
         import yt_dlp  # type: ignore
@@ -199,7 +274,7 @@ def api_download():
 
     except Exception as exc:
         logger.error("yt-dlp error: %s", exc)
-        return jsonify({"error": str(exc)}), 500
+        return jsonify({"error": "Download failed."}), 500
 
 
 def _save_auto_beatmap(bm, audio_filename: str, title: str | None = None):
@@ -268,119 +343,154 @@ def _resolve_audio_filename(requested: str) -> str:
 
 @socketio.on("connect")
 def on_connect():
-    logger.info("Client connected: %s", request.sid)
+    sid = request.sid
+    client_ip = request.remote_addr or "unknown"
+    current = ip_connections.get(client_ip, 0)
+    if current >= MAX_SESSIONS_PER_IP:
+        logger.warning("IP %s exceeds max connections (%d)", client_ip, MAX_SESSIONS_PER_IP)
+        return False
+    ip_connections[client_ip] = current + 1
+    logger.info("Client connected: %s from %s (IP conns=%d, total=%d)",
+                sid, client_ip, current + 1, len(sessions))
+    client_clocks[sid] = 0.0
+    client_clock_started[sid] = time.time() * 1000
     emit("song_list", _build_song_list())
 
 
 @socketio.on("disconnect")
 def on_disconnect():
-    logger.info("Client disconnected: %s", request.sid)
+    sid = request.sid
+    client_ip = request.remote_addr or "unknown"
+    if client_ip in ip_connections:
+        ip_connections[client_ip] = max(0, ip_connections[client_ip] - 1)
+        if ip_connections[client_ip] == 0:
+            del ip_connections[client_ip]
+    session = sessions.pop(sid, None)
+    if session:
+        session.stop()
+    client_clocks.pop(sid, None)
+    client_clock_started.pop(sid, None)
+    logger.info("Client disconnected: %s", sid)
 
 
 @socketio.on("start_game")
 def on_start_game(data):
-    global current_session
-    global client_clock_ms, client_clock_started_at
+    sid = request.sid
 
     requested_audio = str(data.get("audio_file", ""))
     audio_file = _resolve_audio_filename(requested_audio)
     difficulty = data.get("difficulty", "medium")
     bpm_override = float(data.get("bpm", 0))
 
-    # Stop any running session
-    with session_lock:
-        if current_session:
-            current_session.stop()
-            current_session = None
+    # Check global session limit
+    if len(sessions) >= MAX_SESSIONS:
+        emit("error", "Server is full. Try again later.")
+        logger.warning("Session rejected: server full (%d)", MAX_SESSIONS)
+        return
 
-    client_clock_started_at = time.time() * 1000
-    client_clock_ms = 0.0
+    # Stop existing session for this client, if any
+    existing = sessions.pop(sid, None)
+    if existing:
+        existing.stop()
+
+    client_clock_started[sid] = time.time() * 1000
+    client_clocks[sid] = 0.0
 
     # Verify file exists in mounted music folder. Playback happens in browser.
     if not audio_file:
         emit("error", f"Cannot load audio file: {requested_audio}")
         return
 
-    # Keep audio_manager in sync for timing only; if audio device is missing,
-    # we still allow game start and use browser playback.
-    audio_manager.load(audio_file)
+    # Get duration for this session without touching shared audio_manager state.
+    # Browser handles real playback; we just need end-of-song detection.
+    duration_ms = 180_000
+    audio_path = os.path.join(MUSIC_DIR, audio_file)
+    if os.path.isfile(audio_path):
+        try:
+            from mutagen import File as MutagenFile
+            af = MutagenFile(audio_path)
+            if af is not None and af.info:
+                duration_ms = af.info.length * 1000
+        except Exception:
+            pass
 
     # Load or auto-generate beatmap
     beatmap = beatmap_parser.load_for_audio(audio_file)
     if beatmap is None:
         bpm = bpm_override or 120
-        dur = audio_manager.get_duration_ms() or 180_000
         logger.info("No beatmap found for '%s', auto-generating (BPM=%.0f).", audio_file, bpm)
         beatmap = beatmap_parser.generate_auto_beatmap(
             audio_filename=audio_file,
             bpm=bpm,
-            duration_ms=dur,
+            duration_ms=duration_ms,
             difficulty=difficulty,
         )
+    else:
+        # Beatmap gives more accurate end time than audio file
+        last_note_ms = max(n.time_ms for n in beatmap.notes)
+        duration_ms = max(duration_ms, last_note_ms + 2000)
 
-    # SocketIO callbacks (run from game thread → emit to all clients)
+    # SocketIO callbacks emit to THIS client only
     def on_note_spawn(note: dict):
-        socketio.emit("note_spawn", note)
+        socketio.emit("note_spawn", note, to=sid)
 
     def on_hit_result(result: dict, state: dict):
-        socketio.emit("hit_result", result)
-        socketio.emit("score_update", state)
+        socketio.emit("hit_result", result, to=sid)
+        socketio.emit("score_update", state, to=sid)
 
     def on_game_end(state: dict):
-        socketio.emit("game_over", state)
+        socketio.emit("game_over", state, to=sid)
 
     # Create and start session
     session = GameSession(
-        beatmap        = beatmap,
-        audio_manager  = audio_manager,
-        hand_tracker   = hand_tracker,
-        on_note_spawn  = on_note_spawn,
-        on_hit_result  = on_hit_result,
-        on_game_end    = on_game_end,
+        beatmap       = beatmap,
+        audio_manager = audio_manager,
+        duration_ms   = duration_ms,
+        on_note_spawn = on_note_spawn,
+        on_hit_result = on_hit_result,
+        on_game_end   = on_game_end,
     )
 
-    with session_lock:
-        current_session = session
-
-    session.set_external_clock(lambda: client_clock_ms)
-
+    sessions[sid] = session
+    session.set_external_clock(lambda: client_clocks.get(sid, 0.0))
     session.start()
 
     # Confirm to client
     emit("game_started", {
         "beatmap":   beatmap.to_dict(),
-        "scroll_px": 360,            # SCROLL_SPEED_PX_PER_S
-        "height_px": 680,            # GAME_HEIGHT_PX
-        "judgment_px": 580,          # JUDGMENT_LINE_PX
-        "server_start_ms": client_clock_started_at,
+        "scroll_px": 360,
+        "height_px": 680,
+        "judgment_px": 580,
+        "server_start_ms": client_clock_started.get(sid, 0.0),
     })
-    logger.info("Game started: '%s' (%s)", audio_file, difficulty)
+    logger.info("Game started: '%s' (%s) [sid=%s ip=%s]", audio_file, difficulty, sid, request.remote_addr)
 
-    # Kick off note-position push thread
-    _start_note_push_thread(session)
+    # Kick off note-position push thread (scoped to this SID)
+    _start_note_push_thread(session, sid)
 
 
-def _start_note_push_thread(session: GameSession):
-    """Push active note positions to clients at ~30 FPS."""
+def _start_note_push_thread(session: GameSession, sid: str):
+    """Push active note positions to the specific client at ~30 FPS."""
     def pusher():
         while session._running:
             notes = session.get_active_notes()
-            socketio.emit("note_update", notes)
+            socketio.emit("note_update", notes, to=sid)
             time.sleep(1 / 30)
 
-    t = threading.Thread(target=pusher, daemon=True, name="NotePusher")
+    t = threading.Thread(target=pusher, daemon=True, name=f"NotePusher-{sid}")
     t.start()
 
 
 @socketio.on("stop_game")
 def on_stop_game():
-    global current_session
-    with session_lock:
-        if current_session:
-            current_session.stop()
-            current_session = None
+    sid = request.sid
+    session = sessions.pop(sid, None)
+    if session:
+        session.stop()
+    client_clocks.pop(sid, None)
+    client_clock_started.pop(sid, None)
     emit("game_stopped", {})
-    logger.info("Game stopped by client.")
+    logger.info("Game stopped by client [sid=%s ip=%s].", sid, request.remote_addr)
 
 
 @socketio.on("set_volume")
@@ -391,21 +501,23 @@ def on_set_volume(data):
 
 @socketio.on("gesture")
 def on_gesture(data):
-    global current_session
-    global client_clock_ms
-    if current_session is None:
+    sid = request.sid
+    session = sessions.get(sid)
+    if session is None:
         return
 
     direction = data.get("direction", "")
     timestamp_ms = float(data.get("timestamp_ms", 0.0) or 0.0)
-    client_clock_ms = max(client_clock_ms, timestamp_ms)
-    current_session.push_external_gesture(direction, timestamp_ms)
+    client_clocks[sid] = max(client_clocks.get(sid, 0.0), timestamp_ms)
+    session.push_external_gesture(direction, timestamp_ms)
 
 
 @socketio.on("client_clock")
 def on_client_clock(data):
-    global client_clock_ms
-    client_clock_ms = max(client_clock_ms, float(data.get("ms", 0.0) or 0.0))
+    sid = request.sid
+    client_clocks[sid] = max(
+        client_clocks.get(sid, 0.0), float(data.get("ms", 0.0) or 0.0)
+    )
 
 
 # ------------------------------------------------------------------

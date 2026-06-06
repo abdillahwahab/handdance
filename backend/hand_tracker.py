@@ -43,6 +43,10 @@ class HandTracker:
         self._thread: threading.Thread | None = None
         self._lock           = threading.Lock()
 
+        # MJPEG feed subscriber tracking (on-demand streaming)
+        self._feed_clients: set[int] = set()
+        self._feed_lock = threading.Lock()
+
         # Track last gesture timestamp per direction for debounce
         self._last_gesture_time: dict[str, float] = {}
 
@@ -116,6 +120,22 @@ class HandTracker:
             self.gesture_queue.put_nowait(event)
         except queue.Full:
             pass
+
+    def subscribe_feed(self) -> int:
+        """Register an MJPEG consumer. Returns a subscriber ID."""
+        client_id = id(threading.current_thread())
+        with self._feed_lock:
+            self._feed_clients.add(client_id)
+        return client_id
+
+    def unsubscribe_feed(self, client_id: int):
+        """Unregister an MJPEG consumer."""
+        with self._feed_lock:
+            self._feed_clients.discard(client_id)
+
+    def _has_feed_subscribers(self) -> bool:
+        with self._feed_lock:
+            return len(self._feed_clients) > 0
 
     def get_frame_jpeg(self) -> bytes | None:
         """Return the latest annotated frame as JPEG bytes (for live preview stream)."""
@@ -217,10 +237,11 @@ class HandTracker:
             # Visual: draw gesture indicators on annotated frame
             self._draw_hud(annotated)
 
-            # Encode frame to JPEG for browser preview
-            _, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
-            with self._lock:
-                self._latest_jpeg = jpeg.tobytes()
+            # Encode frame to JPEG only when at least one client is watching
+            if self._has_feed_subscribers():
+                _, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                with self._lock:
+                    self._latest_jpeg = jpeg.tobytes()
 
             if self.show_preview:
                 cv2.imshow("Hand Tracker", annotated)

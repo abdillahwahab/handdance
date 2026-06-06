@@ -10,12 +10,12 @@ import time
 import uuid
 import logging
 import copy
+import queue
 from dataclasses import dataclass, field
 from typing import List, Optional, Callable
 
 from beatmap_parser import Beatmap, Note
 from audio_manager import AudioManager
-from hand_tracker import HandTracker
 
 logger = logging.getLogger(__name__)
 
@@ -102,16 +102,19 @@ class GameSession:
         self,
         beatmap:       Beatmap,
         audio_manager: AudioManager,
-        hand_tracker:  HandTracker,
         on_note_spawn:  Callable[[dict], None],
         on_hit_result:  Callable[[dict, dict], None],  # (hit_result, game_state)
         on_game_end:    Callable[[dict], None],
+        duration_ms:   float = 180_000,
         session_id:    str = "",
     ):
         self.beatmap       = beatmap
         self.audio         = audio_manager
-        self.hand          = hand_tracker
         self.session_id    = session_id or str(uuid.uuid4())[:8]
+        self._duration_ms  = duration_ms
+
+        # Per-session gesture queue (browser gestures go here directly)
+        self._gesture_queue: queue.Queue = queue.Queue(maxsize=128)
 
         self._on_note_spawn  = on_note_spawn
         self._on_hit_result  = on_hit_result
@@ -136,7 +139,8 @@ class GameSession:
     # ------------------------------------------------------------------
 
     def start(self):
-        self.audio.play()
+        if self._external_clock is None:
+            self.audio.play()
         self._start_perf = time.perf_counter()
         self._start_audio_ms = self.audio.get_position_ms()
         self._running = True
@@ -152,7 +156,8 @@ class GameSession:
 
     def stop(self):
         self._running = False
-        self.audio.stop()
+        if self._external_clock is None:
+            self.audio.stop()
         if self._thread:
             self._thread.join(timeout=3)
         logger.info("GameSession %s stopped.", self.session_id)
@@ -194,7 +199,10 @@ class GameSession:
             self._auto_miss(now_ms)
 
             # 4. Check song finished
-            if self.audio.is_finished() and self._spawn_idx >= len(self._notes):
+            if (now_ms >= self._duration_ms
+                if self._external_clock is not None
+                else self.audio.is_finished()) and self._spawn_idx >= len(self._notes):
+
                 # Give a small grace period for last notes
                 if not self._active_notes:
                     self._finish()
@@ -219,18 +227,29 @@ class GameSession:
                     break  # notes are time-sorted
 
     def _process_gestures(self, now_ms: float):
-        """Drain gesture queue and judge each gesture."""
+        """Drain per-session gesture queue and judge each gesture."""
         while True:
-            gesture = self.hand.get_gesture(block=False)
-            if gesture is None:
+            try:
+                gesture = self._gesture_queue.get(block=False)
+            except queue.Empty:
                 break
             gesture_ms = gesture["timestamp_ms"]
             direction  = gesture["direction"]
             self._judge(direction, gesture_ms)
 
     def push_external_gesture(self, direction: str, timestamp_ms: float | None = None):
-        """Accept a gesture directly from the browser/client path."""
-        self.hand.push_gesture(direction, timestamp_ms)
+        """Accept a gesture directly from the browser/client path into this session's queue."""
+        if timestamp_ms is None:
+            timestamp_ms = time.time() * 1000
+        direction = str(direction).lower()
+        if direction not in {"left", "right", "up", "down"}:
+            return
+        try:
+            self._gesture_queue.put_nowait(
+                {"direction": direction, "timestamp_ms": timestamp_ms}
+            )
+        except queue.Full:
+            pass
 
     def _now_ms(self) -> float:
         if self._external_clock is not None:
@@ -261,7 +280,6 @@ class GameSession:
             return
 
         # Pick closest note by timing
-        now_audio = self.audio.get_position_ms()
         best = min(candidates, key=lambda n: abs(n.time_ms - gesture_ms))
         diff_ms = gesture_ms - best.time_ms  # positive = late, negative = early
 
