@@ -22,9 +22,10 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------
 # Timing windows (milliseconds)
 # ------------------------------------------------------------------
-PERFECT_WINDOW_MS = 55
-GOOD_WINDOW_MS    = 110
-MISS_WINDOW_MS    = 200   # note auto-misses after this much past ideal time
+PERFECT_WINDOW_MS = 75
+GOOD_WINDOW_MS    = 175
+OK_WINDOW_MS      = 350
+MISS_WINDOW_MS    = 350   # note auto-misses after this much past ideal time
 
 # Scroll parameters
 SCROLL_SPEED_PX_PER_S = 360   # pixels per second (at 1 × speed)
@@ -64,6 +65,7 @@ class GameState:
     max_combo: int  = 0
     perfects:  int  = 0
     goods:     int  = 0
+    oks:       int  = 0
     misses:    int  = 0
     total_notes: int = 0
 
@@ -74,16 +76,17 @@ class GameState:
             "max_combo":   self.max_combo,
             "perfects":    self.perfects,
             "goods":       self.goods,
+            "oks":         self.oks,
             "misses":      self.misses,
             "total_notes": self.total_notes,
             "accuracy":    self._accuracy(),
         }
 
     def _accuracy(self) -> float:
-        judged = self.perfects + self.goods + self.misses
+        judged = self.perfects + self.goods + self.oks + self.misses
         if judged == 0:
             return 100.0
-        return round((self.perfects * 2 + self.goods) / (judged * 2) * 100, 1)
+        return round((self.perfects * 3 + self.goods * 2 + self.oks * 1) / (judged * 3) * 100, 1)
 
 
 class GameSession:
@@ -285,11 +288,11 @@ class GameSession:
 
         abs_diff = abs(diff_ms)
         if abs_diff <= PERFECT_WINDOW_MS:
-            rating, points = "perfect", 2
+            rating, points = "perfect", 3
         elif abs_diff <= GOOD_WINDOW_MS:
-            rating, points = "good", 1
-        elif abs_diff <= MISS_WINDOW_MS:
-            rating, points = "miss", 0
+            rating, points = "good", 2
+        elif abs_diff <= OK_WINDOW_MS:
+            rating, points = "ok", 1
         else:
             # too far from any note
             result = HitResult(
@@ -308,7 +311,7 @@ class GameSession:
 
         # Update state
         self.state.score += points
-        if rating in ("perfect", "good"):
+        if rating in ("perfect", "good", "ok"):
             self.state.combo += 1
             self.state.max_combo = max(self.state.max_combo, self.state.combo)
         else:
@@ -318,6 +321,8 @@ class GameSession:
             self.state.perfects += 1
         elif rating == "good":
             self.state.goods += 1
+        elif rating == "ok":
+            self.state.oks += 1
         else:
             self.state.misses += 1
 

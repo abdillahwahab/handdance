@@ -212,16 +212,15 @@ class BeatmapParser:
         step_ms   = beat_ms / divisions
 
         directions = ["left", "right", "up", "down"]
-        random.seed(42)  # reproducible pattern
 
         notes = []
         t_ms  = beat_ms * 2  # Start 2 beats in to give player time to react
-        idx   = 0
+        note_idx = 0
         while t_ms < duration_ms - beat_ms * 2:
-            direction = directions[idx % 4]
-            idx += 1
+            direction = random.choice(directions)
+            note_idx += 1
             notes.append(Note(
-                note_id   = f"auto_{idx}_{direction}",
+                note_id   = f"auto_{note_idx}_{direction}",
                 time_ms   = t_ms,
                 direction = direction,
             ))

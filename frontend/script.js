@@ -92,6 +92,7 @@ const comboValue      = $("combo-value");
 const feedbackCont    = $("feedback-container");
 const statPerfect     = $("stat-perfect");
 const statGood        = $("stat-good");
+const statOk          = $("stat-ok");
 const statMiss        = $("stat-miss");
 const statAccuracy    = $("stat-accuracy");
 const statMaxCombo    = $("stat-maxcombo");
@@ -106,6 +107,7 @@ const resAccuracy   = $("res-accuracy");
 const resMaxCombo   = $("res-maxcombo");
 const resPerfect    = $("res-perfect");
 const resGood       = $("res-good");
+const resOk         = $("res-ok");
 const resMiss       = $("res-miss");
 const retryBtn      = $("retry-btn");
 const menuBtn       = $("menu-btn");
@@ -190,6 +192,9 @@ function initSocket() {
     clearAllNotes();
     if (noteRenderId) cancelAnimationFrame(noteRenderId);
     noteRenderId = null;
+    if (browserCamera) { cancelAnimationFrame(browserCamera); browserCamera = null; }
+    browserPose = null;
+    handsCtx.clearRect(0, 0, handsOverlay.width, handsOverlay.height);
     showResult(state);
   });
 
@@ -314,17 +319,16 @@ function classifyPoseHold(poseLandmarks) {
     return { command: null, confidence: 0 };
   }
 
-  const headX = nose.x;
   const shoulderY = (leftShoulder.y + rightShoulder.y) / 2;
   const hipY = (leftHip && rightHip) ? (leftHip.y + rightHip.y) / 2 : shoulderY + 0.25;
 
-  const leftDistance = headX - leftWrist.x;
-  const rightDistance = rightWrist.x - headX;
+  const leftDistance = leftWrist.x - leftShoulder.x;
+  const rightDistance = rightShoulder.x - rightWrist.x;
   const upDistance = shoulderY - Math.min(leftWrist.y, rightWrist.y);
   const downDistance = Math.max(leftWrist.y, rightWrist.y) - hipY;
 
-  if (leftDistance > 0.10) return { command: "left", confidence: leftDistance };
-  if (rightDistance > 0.10) return { command: "right", confidence: rightDistance };
+  if (leftDistance > 0.12) return { command: "left", confidence: leftDistance };
+  if (rightDistance > 0.12) return { command: "right", confidence: rightDistance };
   if (upDistance > 0.10) return { command: "up", confidence: upDistance };
   if (downDistance > 0.02) return { command: "down", confidence: downDistance };
 
@@ -350,7 +354,7 @@ function drawHandsOverlay(results) {
   handsCtx.lineWidth = 3;
 
   const points = landmarks.map((lm, idx) => ({
-    x: lm.x * width,
+    x: (1.0 - lm.x) * width,
     y: lm.y * height,
     idx,
   }));
@@ -550,6 +554,7 @@ function showFeedback(rating) {
   const labels = {
     perfect: "PERFECT",
     good:    "GOOD",
+    ok:      "OK",
     miss:    "MISS",
     wrong:   "WRONG",
   };
@@ -585,6 +590,7 @@ function updateScoreDisplay(state) {
   comboValue.textContent   = state.combo;
   statPerfect.textContent  = state.perfects;
   statGood.textContent     = state.goods;
+  statOk.textContent       = state.oks;
   statMiss.textContent     = state.misses;
   statAccuracy.textContent = state.accuracy + "%";
   statMaxCombo.textContent = state.max_combo;
@@ -620,6 +626,7 @@ function showResult(state) {
   resMaxCombo.textContent = state.max_combo;
   resPerfect.textContent  = state.perfects;
   resGood.textContent     = state.goods;
+  resOk.textContent       = state.oks;
   resMiss.textContent     = state.misses;
 
   showScreen("result");
@@ -672,6 +679,7 @@ function wireEvents() {
     comboValue.textContent  = "0";
     statPerfect.textContent = "0";
     statGood.textContent    = "0";
+    statOk.textContent      = "0";
     statMiss.textContent    = "0";
     statAccuracy.textContent = "100%";
     statMaxCombo.textContent = "0";
@@ -684,6 +692,16 @@ function wireEvents() {
       : file;
 
     camStatus.textContent = "Starting...";
+
+    // Clean up previous game resources
+    if (browserCamera) { cancelAnimationFrame(browserCamera); browserCamera = null; }
+    browserPose = null;
+    if (browserStream) {
+      browserStream.getTracks().forEach(t => t.stop());
+      browserStream = null;
+      camPreview.srcObject = null;
+    }
+    handsCtx.clearRect(0, 0, handsOverlay.width, handsOverlay.height);
 
     if (browserAudio) {
       browserAudio.pause();
@@ -742,6 +760,15 @@ function wireEvents() {
 
   // Result: Menu
   menuBtn.addEventListener("click", () => {
+    if (browserStream) {
+      browserStream.getTracks().forEach(t => t.stop());
+      browserStream = null;
+      camPreview.srcObject = null;
+    }
+    if (browserCamera) { cancelAnimationFrame(browserCamera); browserCamera = null; }
+    browserPose = null;
+    handsCtx.clearRect(0, 0, handsOverlay.width, handsOverlay.height);
+    camStatus.textContent = "Browser camera loading...";
     showScreen("menu");
   });
 

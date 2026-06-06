@@ -518,6 +518,7 @@ html, body {
 }
 .feedback-text.perfect { color: var(--perfect); }
 .feedback-text.good    { color: var(--good); }
+.feedback-text.ok      { color: #60a5fa; }
 .feedback-text.miss    { color: var(--miss); }
 .feedback-text.wrong   { color: var(--wrong); font-size: 1.3rem; }
 
@@ -611,6 +612,7 @@ html, body {
 .res-val   { font-size: 1.5rem; font-weight: 900; }
 .perfect-box .res-val { color: var(--perfect); }
 .good-box    .res-val { color: var(--good); }
+.ok-box      .res-val { color: #60a5fa; }
 .miss-box    .res-val { color: var(--miss); }
 
 .result-btns {
